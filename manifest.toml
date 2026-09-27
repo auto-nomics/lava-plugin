@@ -1,0 +1,193 @@
+schema_version = 1
+plugin_name = "lava"
+
+[image]
+reference = "ghcr.io/auto-nomics/autonomics/lava@sha256:b7dd1d3a3493cc32af2dc286f2aace77036b1fd806bee4f14a4ff67509268be7"
+tag = "0.1.5"
+upstream = "josefin-werme LAVA 0.1.5 @ 4738b097bf929ec8af40225c196c57d46d3d8a22 (rocker/r-ver:4.5.1 base)"
+license = "all-rights-reserved"
+
+# Single static family panel: the production UKB EUR binary LD reference
+# v1.1, mounted at the exact legacy mount path with the exact legacy
+# ref.prefix the wrapper rendered for this panel. The tutorial panel
+# (wjixiang/catalog-lava-ref-1000g-test, ref.prefix g1000_test) is NOT
+# bound: v0 panels are static per family (no from_param selection), the
+# loader rejects two panels on one mount path, and both legacy panels
+# shared /panels/lava_ref. Selecting it is the recorded panel-selection
+# DSL gap; it returns with from_param panels.
+[[panels]]
+binding = "lava_ref"
+mount = "/panels/lava_ref"
+bundle = "wjixiang/catalog-lava-ref-ukb-eur"
+
+# Port contract note that applies to BOTH nodes: the legacy wrappers had
+# parameter-driven ports (port_layout_for(sample_overlap, phenotypes.len()))
+# and the factory's data_bundles_for_spec picked the panel per spec. The v0
+# plugin DSL has neither dynamic ports nor panel selection, so each node
+# blesses the dominant legacy shape: input ports 0-1 are the input.info and
+# loci tables, port 2 is ALWAYS the sample.overlap table, and ports 3-4 are
+# the sumstats files for exactly two phenotypes. `phenotypes` is pinned to
+# two entries (min_len = max_len = 2) to match. One-phenotype univ runs,
+# overlap-free runs, and 3+ phenotype scans are the recorded dynamic-ports
+# gap.
+
+[[nodes]]
+kind = "lava"
+desc = "Runs the official LAVA R package for one locus in Podman."
+doc = """
+Runs the official LAVA R package (process.input -> read.loci -> process.locus
+-> run.*) for exactly one locus in an ephemeral OCI container.
+
+Input ports (static five-port contract):
+- port 0: input.info table with phenotype, cases, and controls columns.
+- port 1: LAVA loci table.
+- port 2: sample.overlap table (always required; the legacy
+  sample_overlap = false shape is not expressible in the v0 DSL).
+- ports 3-4: one GWAS sumstats file per phenotype, in phenotypes order.
+
+Parameters:
+- analysis selects the official call: univ, bivar, pcor, or multireg
+  (plain string; the script rejects anything else).
+- phenotypes holds exactly two phenotype IDs matching the input.info rows
+  and the sumstats port order.
+- target shape depends on analysis: bivar takes one phenotype or none,
+  pcor exactly two distinct phenotypes, multireg exactly one outcome;
+  univ must leave it unset. The script enforces all of this with the
+  legacy error messages.
+- locus_id (a LOC identifier from the loci table) wins over locus_index
+  (a one-based row) when both are set.
+- adap_thresh lists adaptive p-value thresholds; leave it unset for the
+  official default. p_values and cis default to true, variances and
+  only_full_model to false, max_r2 to 0.95 (pcor only).
+
+Outputs: port 0 lava.tsv (flattened results TSV), port 1 lava.RDS (the raw
+official result object plus the locus row and analysis name), and port 2
+lava.log (the complete LAVA log). The UKB EUR reference panel is mounted at
+/panels/lava_ref and passed as ref.prefix /panels/lava_ref/lava-ukb-v1.1.
+"""
+timeout_secs = 1800
+
+[nodes.ports]
+inputs = [
+  { type = "file" },
+  { type = "file" },
+  { type = "file" },
+  { type = "file" },
+  { type = "file" },
+]
+outputs = [
+  { path = "lava.tsv", format = "lava_result_tsv" },
+  { path = "lava.RDS", format = "r_rds" },
+  { path = "lava.log", format = "lava_log" },
+]
+
+[nodes.params]
+# v0 has no enum param type; the script rejects values outside
+# univ/bivar/pcor/multireg with a legacy-shaped message.
+analysis = { type = "string", doc = "Official LAVA analysis API: univ, bivar, pcor, or multireg" }
+phenotypes = { type = "string_array", min_len = 2, max_len = 2, doc = "Exactly two phenotype IDs, in input.info and sumstats port order" }
+target = { type = "string_array", optional = true, min_len = 1, doc = "Target phenotype(s); shape depends on analysis (bivar: 1 or none, pcor: 2 distinct, multireg: 1, univ: unset)" }
+locus_index = { type = "int", default = 1, min = 1.0, doc = "One-based row in the loci table; ignored when locus_id is set" }
+locus_id = { type = "string", optional = true, doc = "LOC identifier from the loci table; overrides locus_index" }
+variances = { type = "bool", default = false, doc = "Include local genetic variance in run.univ output" }
+adap_thresh = { type = "string_array", optional = true, min_len = 1, doc = "Adaptive p-value thresholds as numeric strings; unset uses the official default" }
+p_values = { type = "bool", default = true, doc = "Compute simulation p-values" }
+cis = { type = "bool", default = true, doc = "Compute confidence intervals" }
+only_full_model = { type = "bool", default = false, doc = "Run only the full model in run.multireg" }
+max_r2 = { type = "number", default = 0.95, exclusive_min = 0.0, doc = "Maximum marginal R-squared allowed by run.pcor" }
+
+[nodes.command]
+interpreter = "Rscript"
+script_file = "scripts/lava.sh"
+
+# Env keys carry every parameter; the R script is template-free and reads
+# them with Sys.getenv. Booleans render "true"/"false", string arrays
+# render space-joined, and optional-and-absent params render "".
+[nodes.command.env]
+LAVA_ANALYSIS = "{{ analysis }}"
+LAVA_PHENOS = "{{ phenotypes }}"
+LAVA_TARGET = "{{ target }}"
+LAVA_LOCUS_INDEX = "{{ locus_index }}"
+LAVA_LOCUS_ID = "{{ locus_id }}"
+LAVA_VARIANCES = "{{ variances }}"
+LAVA_ADAP_THRESH = "{{ adap_thresh }}"
+LAVA_P_VALUES = "{{ p_values }}"
+LAVA_CIS = "{{ cis }}"
+LAVA_ONLY_FULL_MODEL = "{{ only_full_model }}"
+LAVA_MAX_R2 = "{{ max_r2 }}"
+
+[[nodes]]
+kind = "lava_scan"
+desc = "Runs the official LAVA multiple-locus scan in Podman."
+doc = """
+Runs the official LAVA multiple-locus workflow over a user-provided loci
+table: process.input runs once, then the script iterates read.loci rows and
+calls process.locus plus run.univ.bivar per selected locus, logging and
+skipping locus failures exactly like the official batch workflow.
+
+Input ports (static five-port contract):
+- port 0: input.info table with phenotype, cases, and controls columns.
+- port 1: LAVA loci table.
+- port 2: sample.overlap table (always required; the legacy
+  sample_overlap = false shape is not expressible in the v0 DSL).
+- ports 3-4: one GWAS sumstats file per phenotype, in phenotypes order.
+  run.univ.bivar needs at least two phenotypes, so the two-port contract
+  covers the minimal scan; 3+ phenotype scans are the dynamic-ports gap.
+
+Parameters:
+- phenotypes holds exactly two phenotype IDs matching input.info and the
+  sumstats port order.
+- target optionally pins one phenotype for the bivariate stage; unset
+  tests every pair that passes univ_threshold.
+- locus_ids optionally subsets the scan to LOC identifiers (all rows are
+  scanned when unset); chr optionally filters to one chromosome (23 is
+  chromosome X).
+- univ_threshold is the univariate significance gate (official default
+  0.05); adap_thresh overrides the adaptive p-value thresholds; p_values
+  and cis default to true.
+
+Outputs: port 0 lava_scan.univ.tsv, port 1 lava_scan.bivar.tsv (combined
+per-locus result tables), port 2 lava_scan.RDS (loci plus raw results),
+and port 3 lava_scan.log. The UKB EUR reference panel is mounted at
+/panels/lava_ref and passed as ref.prefix /panels/lava_ref/lava-ukb-v1.1.
+"""
+timeout_secs = 86400
+
+[nodes.ports]
+inputs = [
+  { type = "file" },
+  { type = "file" },
+  { type = "file" },
+  { type = "file" },
+  { type = "file" },
+]
+outputs = [
+  { path = "lava_scan.univ.tsv", format = "lava_univ_result_tsv" },
+  { path = "lava_scan.bivar.tsv", format = "lava_bivar_result_tsv" },
+  { path = "lava_scan.RDS", format = "r_rds" },
+  { path = "lava_scan.log", format = "lava_scan_log" },
+]
+
+[nodes.params]
+phenotypes = { type = "string_array", min_len = 2, max_len = 2, doc = "Exactly two phenotype IDs, in input.info and sumstats port order" }
+target = { type = "string_array", optional = true, min_len = 1, doc = "One phenotype to pin the bivariate stage to; unset scans all pairs passing univ_threshold" }
+locus_ids = { type = "string_array", optional = true, min_len = 1, doc = "LOC identifiers to scan; unset scans every loci row" }
+chr = { type = "int", optional = true, min = 1.0, max = 23.0, doc = "Chromosome filter; LAVA uses 23 for chromosome X" }
+univ_threshold = { type = "number", default = 0.05, exclusive_min = 0.0, max = 1.0, doc = "Univariate significance threshold applied before bivariate tests" }
+adap_thresh = { type = "string_array", optional = true, min_len = 1, doc = "Adaptive p-value thresholds as numeric strings; unset uses the official default" }
+p_values = { type = "bool", default = true, doc = "Compute simulation p-values" }
+cis = { type = "bool", default = true, doc = "Compute confidence intervals" }
+
+[nodes.command]
+interpreter = "Rscript"
+script_file = "scripts/lava_scan.sh"
+
+[nodes.command.env]
+LAVA_SCAN_PHENOS = "{{ phenotypes }}"
+LAVA_SCAN_TARGET = "{{ target }}"
+LAVA_SCAN_LOCUS_IDS = "{{ locus_ids }}"
+LAVA_SCAN_CHR = "{{ chr }}"
+LAVA_SCAN_UNIV_THRESHOLD = "{{ univ_threshold }}"
+LAVA_SCAN_ADAP_THRESH = "{{ adap_thresh }}"
+LAVA_SCAN_P_VALUES = "{{ p_values }}"
+LAVA_SCAN_CIS = "{{ cis }}"
